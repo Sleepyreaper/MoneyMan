@@ -38,6 +38,31 @@ def host_is_local(host_header: str) -> bool:
         hostname = host.split(":", 1)[0]
     return hostname.lower() in _ALLOWED_HOSTNAMES
 
+
+def is_cross_site_post(sec_fetch_site: str | None, origin: str | None) -> bool:
+    """True if a state-changing POST looks cross-site (a CSRF attempt) → reject.
+
+    The Host check (above) stops DNS-rebinding but NOT a plain cross-site form
+    POST: a malicious page can submit a form to http://127.0.0.1:8765/save-* and
+    the Host header is still '127.0.0.1', so it passes. Without this guard such a
+    request could silently overwrite the user's config files. Browsers reveal the
+    real initiator two ways and we trust either:
+
+      * ``Sec-Fetch-Site``: a value of 'cross-site' is a forged submission;
+        'same-origin' / 'same-site' / 'none' come from our own page.
+      * ``Origin``: must name localhost; any other site is rejected.
+
+    If neither header is present (a very old browser doing a genuine same-origin
+    POST) we allow it — a cross-site attacker's browser always sends ``Origin``
+    on a cross-origin POST, so the hole is closed.
+    """
+    if sec_fetch_site:
+        return sec_fetch_site.strip().lower() == "cross-site"
+    if origin:
+        hostname = urllib.parse.urlsplit(origin.strip()).hostname or ""
+        return hostname.lower() not in _ALLOWED_HOSTNAMES
+    return False
+
 # Editable profile inputs are named with their exact CSV field label, so saving
 # is a direct write. (Listed here only to know which posted keys are profile.)
 _PROFILE_FIELDS = {
@@ -160,6 +185,17 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"MoneyMan only accepts requests from this computer.")
         return True
 
+    def _reject_cross_site(self) -> bool:
+        """Block cross-site POSTs to the save endpoints (CSRF defense)."""
+        if is_cross_site_post(self.headers.get("Sec-Fetch-Site"),
+                              self.headers.get("Origin")):
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"MoneyMan blocked a cross-site request.")
+            return True
+        return False
+
     def _html(self, status=200):
         from .__main__ import compute
         analysis, plan, warnings, stats, _, dup = compute(_Handler.paths)
@@ -184,6 +220,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self._reject_foreign_host():
+            return
+        if self._reject_cross_site():
             return
         length = int(self.headers.get("Content-Length", 0))
         form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))

@@ -33,7 +33,7 @@ from moneyman.planning import (amortize, liquid_cash_from_balances,
                                standard_payment, tax_insights)
 from moneyman.forecast import (cashflow_forecast, expected_monthly_net, goal_plan,
                                safe_to_spend)
-from moneyman.serve import host_is_local
+from moneyman.serve import host_is_local, is_cross_site_post
 from datetime import date
 
 RULES = DEFAULT_CATEGORY_RULES
@@ -501,6 +501,30 @@ class TestServeHostGuard(unittest.TestCase):
     def test_foreign_or_missing_host_rejected(self):
         for h in ("evil.com:8765", "192.168.1.5:8765", "attacker.example", ""):
             self.assertFalse(host_is_local(h), repr(h))
+
+
+class TestServeCsrfGuard(unittest.TestCase):
+    def test_cross_site_sec_fetch_blocked(self):
+        self.assertTrue(is_cross_site_post("cross-site", None))
+        self.assertTrue(is_cross_site_post("Cross-Site", "http://127.0.0.1:8765"))
+
+    def test_same_origin_sec_fetch_allowed(self):
+        for sfs in ("same-origin", "same-site", "none"):
+            self.assertFalse(is_cross_site_post(sfs, None), sfs)
+
+    def test_foreign_origin_blocked_when_no_sec_fetch(self):
+        for o in ("https://evil.com", "http://attacker.example:9000",
+                  "https://127.0.0.1.evil.com"):
+            self.assertTrue(is_cross_site_post(None, o), o)
+
+    def test_local_origin_allowed_when_no_sec_fetch(self):
+        for o in ("http://127.0.0.1:8765", "http://localhost:8765",
+                  "http://[::1]:8765"):
+            self.assertFalse(is_cross_site_post(None, o), o)
+
+    def test_no_signal_is_allowed(self):
+        # A genuine same-origin POST from an old browser sends neither header.
+        self.assertFalse(is_cross_site_post(None, None))
 
 
 if __name__ == "__main__":
