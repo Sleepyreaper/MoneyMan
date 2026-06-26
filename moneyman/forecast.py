@@ -152,6 +152,98 @@ def renewal_calendar(recurring: list[dict], today: date | None = None,
 
 
 # --------------------------------------------------------------------------- #
+# What-if: cancel discretionary subscriptions and redirect the savings
+# --------------------------------------------------------------------------- #
+_DISCRETIONARY_SUB_CATEGORIES = {
+    "Streaming", "Software & Apps", "Entertainment", "Health & Fitness",
+}
+
+
+def cancelable_subscriptions(recurring: list[dict]) -> list[dict]:
+    """Active, clearly-discretionary recurring charges, biggest annual cost first.
+
+    Deliberately conservative: it only ever suggests cancelling obviously
+    optional things (streaming, apps, entertainment, gym) — never rent, utilities,
+    insurance, or groceries.
+    """
+    subs = [r for r in recurring
+            if r.get("active")
+            and r.get("category") in _DISCRETIONARY_SUB_CATEGORIES
+            and (r.get("annual_cost") or 0) > 0]
+    subs.sort(key=lambda r: r.get("annual_cost", 0), reverse=True)
+    return subs
+
+
+def what_if_cancel_subscriptions(recurring: list[dict], debts: list,
+                                 base_monthly: float,
+                                 invest_return_pct: float = 7.0) -> dict:
+    """Quantify cancelling discretionary subscriptions and redirecting the money.
+
+    For each scenario (cancel the top 1, top 3, or all discretionary subscriptions)
+    we compute the monthly money freed, and:
+      * with debts: re-run the avalanche payoff with that money added on top of
+        `base_monthly` (your minimum payments) and report months and interest saved
+        versus doing nothing — the "debt-free X months sooner" story;
+      * with no debts: show the annual savings and what it grows to if invested.
+
+    Everything is your own data, computed locally — no black box.
+    """
+    from .debts import simulate_payoff
+
+    subs = cancelable_subscriptions(recurring)
+    if not subs:
+        return {"has_subs": False}
+
+    has_debts = bool(debts) and any(getattr(d, "balance", 0) > 0 for d in debts)
+    baseline = simulate_payoff(debts, base_monthly, "avalanche") if has_debts else None
+
+    def _fv_monthly(amount: float, years: int) -> float:
+        mr = max(0.0, invest_return_pct) / 100.0 / 12.0
+        n = years * 12
+        if mr <= 0:
+            return round(amount * n, 2)
+        return round(amount * (((1 + mr) ** n - 1) / mr), 2)
+
+    def _scenario(picked: list[dict]) -> dict:
+        monthly_freed = round(sum(s["annual_cost"] for s in picked) / 12.0, 2)
+        out = {
+            "cancel": [{"merchant": s["merchant"],
+                        "annual_cost": round(s["annual_cost"], 2)} for s in picked],
+            "count": len(picked),
+            "monthly_freed": monthly_freed,
+            "annual_savings": round(monthly_freed * 12, 2),
+        }
+        if has_debts and baseline is not None:
+            new = simulate_payoff(debts, base_monthly + monthly_freed, "avalanche")
+            ok = baseline.finished and new.finished
+            out["months_saved"] = baseline.months - new.months if ok else None
+            out["interest_saved"] = (round(baseline.total_interest
+                                           - new.total_interest, 2) if ok else None)
+            out["new_payoff_date"] = new.payoff_date
+        else:
+            out["invested_5yr"] = _fv_monthly(monthly_freed, 5)
+            out["invested_10yr"] = _fv_monthly(monthly_freed, 10)
+        return out
+
+    scenarios, seen = [], set()
+    for k in (1, 3, len(subs)):
+        k = min(k, len(subs))
+        if k in seen:
+            continue
+        seen.add(k)
+        scenarios.append(_scenario(subs[:k]))
+
+    return {
+        "has_subs": True,
+        "has_debts": has_debts,
+        "subscriptions": [{"merchant": s["merchant"],
+                           "category": s.get("category", ""),
+                           "annual_cost": round(s["annual_cost"], 2)} for s in subs],
+        "scenarios": scenarios,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Safe to spend
 # --------------------------------------------------------------------------- #
 def safe_to_spend(income_monthly: float, essentials_monthly: float,

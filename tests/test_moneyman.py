@@ -33,7 +33,8 @@ from moneyman.planning import (amortize, balances_from_statements,
                                lump_sum_options, mortgage_analysis,
                                networth_series, standard_payment, tax_insights)
 from moneyman.forecast import (cashflow_forecast, expected_monthly_net, goal_plan,
-                               renewal_calendar, safe_to_spend)
+                               cancelable_subscriptions, renewal_calendar,
+                               safe_to_spend, what_if_cancel_subscriptions)
 from moneyman.serve import host_is_local, is_cross_site_post
 from moneyman.store import Store
 from moneyman.report import _esc
@@ -789,6 +790,45 @@ class TestNetWorthTrendFromStatements(unittest.TestCase):
     def test_unparseable_period_is_skipped(self):
         metas = [self._meta("Checking", "bank", "sometime", 500.0)]
         self.assertEqual(balances_from_statements(metas), [])
+
+
+class TestWhatIfSubscriptions(unittest.TestCase):
+    def _sub(self, merchant, annual, category="Streaming", active=True):
+        return {"merchant": merchant, "category": category, "active": active,
+                "annual_cost": annual, "periods_per_year": 12,
+                "typical_amount": round(annual / 12, 2)}
+
+    def test_only_discretionary_active_subs_are_cancelable(self):
+        recurring = [
+            self._sub("Netflix", 180.0),
+            self._sub("Rent", 24000.0, category="Housing"),       # essential
+            self._sub("Old App", 60.0, active=False),             # inactive
+            self._sub("Spotify", 120.0, category="Software & Apps"),
+        ]
+        names = [s["merchant"] for s in cancelable_subscriptions(recurring)]
+        self.assertEqual(names, ["Netflix", "Spotify"])           # biggest first
+
+    def test_redirecting_to_debt_shortens_payoff(self):
+        recurring = [self._sub("Netflix", 240.0), self._sub("Hulu", 180.0)]
+        debts = [Debt(name="Visa", kind="credit card", balance=4000.0, apr=22.0,
+                      min_payment=100.0)]
+        w = what_if_cancel_subscriptions(recurring, debts, base_monthly=100.0)
+        self.assertTrue(w["has_subs"])
+        self.assertTrue(w["has_debts"])
+        worst = w["scenarios"][-1]                                # cancel all
+        self.assertGreater(worst["monthly_freed"], 0)
+        self.assertGreaterEqual(worst["months_saved"], 1)        # pays off sooner
+        self.assertGreater(worst["interest_saved"], 0)
+
+    def test_no_debts_shows_invested_value(self):
+        recurring = [self._sub("Netflix", 240.0)]
+        w = what_if_cancel_subscriptions(recurring, debts=[], base_monthly=0.0)
+        self.assertFalse(w["has_debts"])
+        self.assertGreater(w["scenarios"][0]["invested_10yr"], 0)
+
+    def test_no_subscriptions_returns_flag(self):
+        w = what_if_cancel_subscriptions([], debts=[], base_monthly=0.0)
+        self.assertFalse(w["has_subs"])
 
 
 if __name__ == "__main__":

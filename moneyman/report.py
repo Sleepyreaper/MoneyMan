@@ -595,6 +595,42 @@ def _bills_section(plan: dict) -> str:
             f'<b>{_money(total)}/yr</b>.</p>{rows}')
 
 
+def _whatif_subs_section(plan: dict) -> str:
+    """What-if: cancel discretionary subscriptions and redirect the money."""
+    w = plan.get("whatif_subs") or {}
+    if not w.get("has_subs"):
+        return ""
+    subs = w.get("subscriptions", [])
+    sub_total = sum(s["annual_cost"] for s in subs)
+    chips = " ".join(
+        f'<span style="display:inline-block;background:#eef2f7;border-radius:10px;'
+        f'padding:2px 8px;margin:2px;font-size:.85em">{_esc(s["merchant"])} '
+        f'<b>{_money(s["annual_cost"])}/yr</b></span>' for s in subs[:12])
+    rows = ""
+    for sc in w.get("scenarios", []):
+        names = ", ".join(_esc(c["merchant"]) for c in sc["cancel"])
+        if w.get("has_debts") and sc.get("months_saved") is not None:
+            effect = (f'debt-free <b>{sc["months_saved"]} months sooner</b> '
+                      f'(~{_money(sc["interest_saved"])} interest saved), '
+                      f'payoff {_esc(sc.get("new_payoff_date", ""))}')
+        elif w.get("has_debts"):
+            effect = (f'~<b>{_money(sc["monthly_freed"])}/mo</b> extra toward debt')
+        else:
+            effect = (f'~<b>{_money(sc.get("invested_10yr", 0))}</b> in 10 yrs if '
+                      f'invested')
+        rows += (f'<tr><td>Cancel {sc["count"]} ({names})</td>'
+                 f'<td class="num">{_money(sc["annual_savings"])}/yr</td>'
+                 f'<td>{effect}</td></tr>')
+    return (
+        f'<p class="lede">You have <b>{_money(sub_total)}/yr</b> in discretionary '
+        f'subscriptions. See exactly what cancelling some and redirecting the money '
+        f'would do — your numbers, no guesswork.</p>'
+        f'<div style="margin:8px 0">{chips}</div>'
+        f'<div class="tablewrap"><table><thead><tr><th>What-if</th>'
+        f'<th class="num">You save</th><th>The payoff</th></tr></thead>'
+        f'<tbody>{rows}</tbody></table></div>')
+
+
 def _possibilities_section(plan: dict) -> str:
     lumps = plan["lump_sums"]
     if not plan["payoff"].get("has_debts") and not lumps:
@@ -1391,10 +1427,14 @@ def build_html(analysis: dict, data_root: Path, warnings: list[str],
     mortgage_html = _mortgage_section(plan)
     mortgage_block = (f'<h3 style="margin-top:18px">🏠 Pay your home loan down faster'
                       f'</h3>{mortgage_html}') if mortgage_html else ""
+    whatif_subs_html = _whatif_subs_section(plan)
+    whatif_subs_block = (
+        '<h3 style="margin-top:18px">🔮 What-if: cancel subscriptions, pay debt '
+        'faster</h3>' + whatif_subs_html) if whatif_subs_html else ""
     debts_inner = (
         f'<h2>💳 Debts &amp; your path to $0</h2>{_debts_section(plan)}'
         f'<div style="margin-top:14px">{payoff_or_prompt}</div>'
-        f'{mortgage_block}{possibilities_html}')
+        f'{mortgage_block}{whatif_subs_block}{possibilities_html}')
     cashflow_inner = (
         f'<h2>💵 Safe to spend</h2>{_safe_to_spend_section(plan)}'
         f'<h2 style="margin-top:18px">🔮 Cash-flow forecast</h2>'
