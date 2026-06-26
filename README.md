@@ -40,10 +40,24 @@ See [Research & Design](docs/RESEARCH-AND-DESIGN.md).
    - fill in `config\Accounts-and-Debts.csv` and `config\My-Profile.csv`,
    - run it again. Your plan opens in your browser.
 
+## Quick start (macOS / Linux)
+
+The same launchers are provided as double-click **`.command`** files (macOS
+opens them in Terminal; on Linux run them with `bash Run-MoneyMan.command` or
+mark them executable):
+
+1. **`Setup.command`** — one-time, installs the offline PDF reader.
+2. **`Try-Demo.command`** — see a full plan built from realistic fake data.
+3. **`Run-MoneyMan.command`** — creates `~/Documents/MoneyMan/`, then works just
+   like the Windows steps above.
+
+> macOS may warn the first time you open a downloaded `.command` file. Right-click
+> it → **Open** once to approve it, or run `chmod +x *.command` in the folder.
+
 ### From a terminal
 ```sh
 python -m moneyman --demo     # generate sample data and open a full plan
-python -m moneyman            # analyze Documents\MoneyMan and open the report
+python -m moneyman            # analyze your MoneyMan folder and open the report
 python -m moneyman init       # just create the folder structure
 python -m moneyman interview  # plain-language Q&A that fills in your profile + debt rates
 python -m moneyman serve      # edit your info in a local browser app (saves persist)
@@ -52,7 +66,8 @@ python -m moneyman --no-open  # build the report without opening a browser
 ```
 
 The `interview` and `serve` commands are also available as the double-click
-`Interview.bat` and `Edit-MoneyMan.bat` launchers.
+`Interview.bat` / `Edit-MoneyMan.bat` (Windows) and `Interview.command` /
+`Edit-MoneyMan.command` (macOS / Linux) launchers.
 
 **Requirements:** Python 3.9+. PDF reading needs `pdfplumber`/`pypdf`
 (`pip install -r requirements.txt`); CSV/QFX work with zero dependencies.
