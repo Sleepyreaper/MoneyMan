@@ -66,7 +66,7 @@ def is_cross_site_post(sec_fetch_site: str | None, origin: str | None) -> bool:
 # Editable profile inputs are named with their exact CSV field label, so saving
 # is a direct write. (Listed here only to know which posted keys are profile.)
 _PROFILE_FIELDS = {
-    "Monthly take-home income", "Filing status (single/mfj)",
+    "Monthly take-home income", "Filing status (single/mfj/hoh/mfs)",
     "Your age", "Target retirement age", "Cash savings", "Retirement balance",
     "Monthly retirement contribution",
     "Estimated Social Security (monthly, household)", "Inflation assumption (%)",

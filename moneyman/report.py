@@ -562,10 +562,14 @@ def _tax_section(plan: dict) -> str:
     t = plan.get("tax")
     if not t:
         return ""
-    fil = "married filing jointly" if t["filing"] == "mfj" else "single"
+    fil = {"mfj": "married filing jointly", "single": "single",
+           "hoh": "head of household",
+           "mfs": "married filing separately"}.get(t["filing"], t["filing"])
+    yr = t.get("tax_year")
+    yr_txt = f"{yr} " if yr else ""
     return (
         f'<div class="panel"><b>🧾 Your tax picture</b> '
-        f'<span class="subtle">(federal estimate, {fil} — not tax advice)</span>'
+        f'<span class="subtle">({yr_txt}federal estimate, {fil} — not tax advice)</span>'
         f'<div style="margin-top:8px">Marginal bracket <b>{t["marginal_rate"]:.0f}%</b>'
         f' · effective rate ~<b>{t["effective_rate"]:.0f}%</b> · est. federal tax '
         f'~{_money(t["est_federal_tax"])} on {_money(t["gross_income"])}.</div>'

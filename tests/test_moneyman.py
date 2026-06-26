@@ -465,6 +465,26 @@ class TestTaxInsights(unittest.TestCase):
     def test_zero_income_returns_none(self):
         self.assertIsNone(tax_insights(0.0, "mfj"))
 
+    def test_head_of_household_supported(self):
+        t = tax_insights(90_000.0, "hoh")
+        self.assertEqual(t["filing"], "hoh")
+        self.assertEqual(t["std_deduction"], 23625)
+        # taxable 66,375 -> HoH 22% band (64,850–103,350)
+        self.assertEqual(t["marginal_rate"], 22.0)
+
+    def test_married_filing_separately_supported(self):
+        t = tax_insights(300_000.0, "mfs")
+        self.assertEqual(t["filing"], "mfs")
+        self.assertEqual(t["std_deduction"], 15750)
+        # taxable 284,250 -> MFS 35% band (250,525–375,800)
+        self.assertEqual(t["marginal_rate"], 35.0)
+
+    def test_unknown_filing_defaults_to_mfj(self):
+        self.assertEqual(tax_insights(120_000.0, "bogus")["filing"], "mfj")
+
+    def test_result_is_stamped_with_tax_year(self):
+        self.assertEqual(tax_insights(80_000.0, "single")["tax_year"], 2025)
+
 
 class TestLiquidCash(unittest.TestCase):
     def test_only_cash_accounts_counted(self):
