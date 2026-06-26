@@ -34,6 +34,8 @@ from moneyman.planning import (amortize, liquid_cash_from_balances,
 from moneyman.forecast import (cashflow_forecast, expected_monthly_net, goal_plan,
                                safe_to_spend)
 from moneyman.serve import host_is_local, is_cross_site_post
+from moneyman.store import Store
+from moneyman.report import _esc
 from datetime import date
 
 RULES = DEFAULT_CATEGORY_RULES
@@ -566,6 +568,131 @@ class TestPrivacyBoundary(unittest.TestCase):
             self.assertTrue(any("requests" in v for v in violations))
             self.assertTrue(any("socket" in v for v in violations))
             self.assertFalse(any("ok.py" in v for v in violations))
+
+
+class TestPayoffInvariants(unittest.TestCase):
+    """Money-conservation properties of the payoff engine — a wrong number here
+    quietly misleads someone about their debt, so guard the invariants."""
+
+    def _debts(self):
+        return [
+            Debt(name="Visa", kind="credit card", balance=6000.0, apr=24.0,
+                 min_payment=150.0),
+            Debt(name="Car", kind="auto loan", balance=12000.0, apr=6.0,
+                 min_payment=300.0),
+            Debt(name="Med", kind="medical", balance=1500.0, apr=0.0,
+                 min_payment=50.0),
+        ]
+
+    def test_money_is_conserved(self):
+        # What you pay out == what you owed + the interest that accrued.
+        for strat in ("avalanche", "snowball"):
+            res = simulate_payoff(self._debts(), 900.0, strat)
+            self.assertTrue(res.finished, strat)
+            owed = sum(d.balance for d in self._debts())
+            self.assertAlmostEqual(res.total_paid, owed + res.total_interest,
+                                   delta=1.0, msg=strat)
+
+    def test_avalanche_never_costs_more_than_snowball(self):
+        ava = simulate_payoff(self._debts(), 700.0, "avalanche")
+        sno = simulate_payoff(self._debts(), 700.0, "snowball")
+        self.assertLessEqual(ava.total_interest, sno.total_interest + 1e-6)
+
+    def test_paying_more_never_increases_interest_or_time(self):
+        small = simulate_payoff(self._debts(), 600.0, "avalanche")
+        big = simulate_payoff(self._debts(), 1200.0, "avalanche")
+        self.assertLessEqual(big.total_interest, small.total_interest)
+        self.assertLessEqual(big.months, small.months)
+
+
+class TestStoreDedup(unittest.TestCase):
+    def _txn(self, date, amount, merchant, fitid=None, occ=1, src="f.csv"):
+        return Txn(account="Acct", date=date, amount=amount,
+                   raw_description=merchant, source_file=src, merchant=merchant,
+                   fitid=fitid, occ=occ, category="Shopping")
+
+    def test_reimporting_same_statement_collapses(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(Path(d) / "m.db")
+            first = [self._txn("2024-01-05", -5.0, "Coffee"),
+                     self._txn("2024-01-06", -9.0, "Lunch")]
+            again = [self._txn("2024-01-05", -5.0, "Coffee"),
+                     self._txn("2024-01-06", -9.0, "Lunch")]
+            ins1, _ = s.upsert_many(first)
+            ins2, dup2 = s.upsert_many(again)
+            self.assertEqual(ins1, 2)
+            self.assertEqual((ins2, dup2), (0, 2))   # nothing new the 2nd time
+            self.assertEqual(s.count(), 2)
+            s.close()
+
+    def test_genuine_same_day_repeats_are_kept(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(Path(d) / "m.db")
+            ins, _ = s.upsert_many([self._txn("2024-01-05", -5.0, "Coffee", occ=1),
+                                    self._txn("2024-01-05", -5.0, "Coffee", occ=2)])
+            self.assertEqual(ins, 2)
+            self.assertEqual(s.count(), 2)
+            s.close()
+
+    def test_fitid_collapses_across_different_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(Path(d) / "m.db")
+            ins1, _ = s.upsert_many(
+                [self._txn("2024-01-05", -5.0, "Coffee", fitid="ABC", src="a.csv")])
+            ins2, _ = s.upsert_many(
+                [self._txn("2024-01-05", -5.0, "Coffee", fitid="ABC", src="b.csv")])
+            self.assertEqual((ins1, ins2), (1, 0))
+            s.close()
+
+
+class TestRefundsAndReversals(unittest.TestCase):
+    def test_refund_nets_against_the_purchase(self):
+        rows = [_rec("2024-03-01", -120.0, "Big Store", "Shopping"),
+                _rec("2024-03-09", 30.0, "Big Store", "Shopping")]   # partial refund
+        a = analyze(rows)
+        self.assertAlmostEqual(a["summary"]["net"], -90.0)
+
+
+class TestHostileImport(unittest.TestCase):
+    def _write(self, text):
+        f = Path(tempfile.mkstemp(suffix=".csv")[1])
+        f.write_text(text, encoding="utf-8")
+        return f
+
+    def test_malformed_rows_are_skipped_not_fatal(self):
+        f = self._write("Date,Description,Amount\n"
+                        "2024-01-02,GOOD ROW,-5.00\n"
+                        "not-a-date,BAD DATE,-1.00\n"
+                        "2024-01-03,BAD AMOUNT,abc\n")
+        txns, warnings = parse_csv(f, "Card")
+        self.assertEqual(len(txns), 1)
+        self.assertEqual(txns[0].raw_description, "GOOD ROW")
+        self.assertTrue(warnings)
+
+    def test_script_in_description_is_neutralized_when_rendered(self):
+        payload = "<script>alert(1)</script>"
+        f = self._write("Date,Description,Amount\n"
+                        f"2024-01-02,{payload},-5.00\n")
+        txns, _ = parse_csv(f, "Card")
+        self.assertIn("script", txns[0].raw_description)   # parse preserves text
+        rendered = _esc(txns[0].raw_description)            # render must escape it
+        self.assertNotIn("<script>", rendered)
+        self.assertIn("&lt;script&gt;", rendered)
+
+    def test_esc_escapes_quotes_for_attributes(self):
+        self.assertNotIn('"', _esc('"><img src=x onerror=alert(1)>'))
+
+
+class TestForecastEdges(unittest.TestCase):
+    def test_no_history_does_not_crash(self):
+        f = cashflow_forecast(1000.0, [], months=6)
+        self.assertEqual(f["typical_net"], 0.0)
+        self.assertTrue(f["healthy"])      # flat line never dips below the floor
+
+    def test_expected_net_on_empty_history(self):
+        e = expected_monthly_net([])
+        self.assertEqual(e["months_used"], 0)
+        self.assertEqual(e["typical"], 0.0)
 
 
 if __name__ == "__main__":
