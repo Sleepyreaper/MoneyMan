@@ -562,10 +562,14 @@ def _tax_section(plan: dict) -> str:
     t = plan.get("tax")
     if not t:
         return ""
-    fil = "married filing jointly" if t["filing"] == "mfj" else "single"
+    fil = {"mfj": "married filing jointly", "single": "single",
+           "hoh": "head of household",
+           "mfs": "married filing separately"}.get(t["filing"], t["filing"])
+    yr = t.get("tax_year")
+    yr_txt = f"{yr} " if yr else ""
     return (
         f'<div class="panel"><b>🧾 Your tax picture</b> '
-        f'<span class="subtle">(federal estimate, {fil} — not tax advice)</span>'
+        f'<span class="subtle">({yr_txt}federal estimate, {fil} — not tax advice)</span>'
         f'<div style="margin-top:8px">Marginal bracket <b>{t["marginal_rate"]:.0f}%</b>'
         f' · effective rate ~<b>{t["effective_rate"]:.0f}%</b> · est. federal tax '
         f'~{_money(t["est_federal_tax"])} on {_money(t["gross_income"])}.</div>'
@@ -589,6 +593,42 @@ def _bills_section(plan: dict) -> str:
     return (f'<p class="lede">Fixed bills are the easiest savings — a few phone calls, '
             f'no lifestyle change. Estimated room to save: '
             f'<b>{_money(total)}/yr</b>.</p>{rows}')
+
+
+def _whatif_subs_section(plan: dict) -> str:
+    """What-if: cancel discretionary subscriptions and redirect the money."""
+    w = plan.get("whatif_subs") or {}
+    if not w.get("has_subs"):
+        return ""
+    subs = w.get("subscriptions", [])
+    sub_total = sum(s["annual_cost"] for s in subs)
+    chips = " ".join(
+        f'<span style="display:inline-block;background:#eef2f7;border-radius:10px;'
+        f'padding:2px 8px;margin:2px;font-size:.85em">{_esc(s["merchant"])} '
+        f'<b>{_money(s["annual_cost"])}/yr</b></span>' for s in subs[:12])
+    rows = ""
+    for sc in w.get("scenarios", []):
+        names = ", ".join(_esc(c["merchant"]) for c in sc["cancel"])
+        if w.get("has_debts") and sc.get("months_saved") is not None:
+            effect = (f'debt-free <b>{sc["months_saved"]} months sooner</b> '
+                      f'(~{_money(sc["interest_saved"])} interest saved), '
+                      f'payoff {_esc(sc.get("new_payoff_date", ""))}')
+        elif w.get("has_debts"):
+            effect = (f'~<b>{_money(sc["monthly_freed"])}/mo</b> extra toward debt')
+        else:
+            effect = (f'~<b>{_money(sc.get("invested_10yr", 0))}</b> in 10 yrs if '
+                      f'invested')
+        rows += (f'<tr><td>Cancel {sc["count"]} ({names})</td>'
+                 f'<td class="num">{_money(sc["annual_savings"])}/yr</td>'
+                 f'<td>{effect}</td></tr>')
+    return (
+        f'<p class="lede">You have <b>{_money(sub_total)}/yr</b> in discretionary '
+        f'subscriptions. See exactly what cancelling some and redirecting the money '
+        f'would do — your numbers, no guesswork.</p>'
+        f'<div style="margin:8px 0">{chips}</div>'
+        f'<div class="tablewrap"><table><thead><tr><th>What-if</th>'
+        f'<th class="num">You save</th><th>The payoff</th></tr></thead>'
+        f'<tbody>{rows}</tbody></table></div>')
 
 
 def _possibilities_section(plan: dict) -> str:
@@ -881,6 +921,41 @@ def _dur(months: int) -> str:
     if y:
         return f"{y} yr"
     return f"{m} mo"
+
+
+def _days_away(n: int) -> str:
+    if n <= 0:
+        return "today"
+    if n == 1:
+        return "tomorrow"
+    return f"in {n} days"
+
+
+def _renewals_section(plan: dict) -> str:
+    """A 'renews in the next N days' calendar built from recurring detection."""
+    cal = plan.get("renewals") or {}
+    items = cal.get("items", [])
+    horizon = cal.get("horizon_days", 45)
+    if not items:
+        return ('<div class="subtle">No upcoming subscription or bill renewals '
+                f'detected in the next {horizon} days.</div>')
+    rows = "".join(
+        f'<tr><td>{_esc(i["next_date"])}</td>'
+        f'<td>{("⚠️ " if i["soon"] else "")}{_days_away(i["days_until"])}</td>'
+        f'<td>{_esc(i["merchant"])}</td>'
+        f'<td>{_esc(i["cadence"])}</td>'
+        f'<td class="num">{_money(i["amount"])}</td></tr>'
+        for i in items)
+    soon = cal.get("soon_total", 0)
+    soon_note = (f' <b>{_money(soon)}</b> of that lands within 7 days.'
+                 if soon else "")
+    return (
+        f'<p class="lede">About <b>{_money(cal.get("total_amount", 0))}</b> of '
+        f'subscriptions and bills are scheduled to charge in the next {horizon} '
+        f'days.{soon_note} Cancel anything you don\'t want <i>before</i> it renews.</p>'
+        f'<div class="tablewrap"><table><thead><tr><th>Date</th><th>When</th>'
+        f'<th>Vendor</th><th>Cadence</th><th class="num">Amount</th></tr></thead>'
+        f'<tbody>{rows}</tbody></table></div>')
 
 
 def monthly_bills_section(analysis: dict) -> str:
@@ -1347,14 +1422,19 @@ def build_html(analysis: dict, data_root: Path, warnings: list[str],
         f'<p class="lede">The few highest-impact things — biggest dollars first. '
         f'Click any one to see the exact transactions behind it.</p>'
         f'{prio_top}{prio_more}'
-        f'<h2>📅 Bills you pay every month — did you know?</h2>{bills_block}')
+        f'<h2>📅 Bills you pay every month — did you know?</h2>{bills_block}'
+        f'<h2>🔔 Renewing soon</h2>{_renewals_section(plan)}')
     mortgage_html = _mortgage_section(plan)
     mortgage_block = (f'<h3 style="margin-top:18px">🏠 Pay your home loan down faster'
                       f'</h3>{mortgage_html}') if mortgage_html else ""
+    whatif_subs_html = _whatif_subs_section(plan)
+    whatif_subs_block = (
+        '<h3 style="margin-top:18px">🔮 What-if: cancel subscriptions, pay debt '
+        'faster</h3>' + whatif_subs_html) if whatif_subs_html else ""
     debts_inner = (
         f'<h2>💳 Debts &amp; your path to $0</h2>{_debts_section(plan)}'
         f'<div style="margin-top:14px">{payoff_or_prompt}</div>'
-        f'{mortgage_block}{possibilities_html}')
+        f'{mortgage_block}{whatif_subs_block}{possibilities_html}')
     cashflow_inner = (
         f'<h2>💵 Safe to spend</h2>{_safe_to_spend_section(plan)}'
         f'<h2 style="margin-top:18px">🔮 Cash-flow forecast</h2>'

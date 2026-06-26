@@ -70,8 +70,10 @@ on what the tools above compete on and what causes real financial leakage.
 - **Trends & visuals**: monthly cash flow, spending by category, top merchants.
 - **Searchable, sortable transaction table.**
 - **A single self-contained HTML report** that opens offline.
-- **True privacy**: standard-library Python only, no network calls, no telemetry,
-  no third-party packages that could phone home.
+- **True privacy**: standard-library Python only, no telemetry, and no
+  third-party packages that could phone home. Makes no network calls at runtime —
+  except one off-by-default, address-only home-value lookup you must explicitly
+  enable.
 
 ### 🟦 Should-have — *natural next steps*
 - **Net-worth tracking**: read account balances (assets/debts) over time.

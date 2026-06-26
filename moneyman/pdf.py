@@ -36,6 +36,13 @@ except Exception:
 
 PDF_AVAILABLE = _HAVE_PDFPLUMBER or _HAVE_PYPDF
 
+# Resource caps so a malformed or hostile PDF can't exhaust memory. Real bank
+# statements are small (a few pages, well under a megabyte of text); these limits
+# are far above any legitimate statement while bounding a decompression bomb.
+MAX_PDF_BYTES = 50 * 1024 * 1024      # 50 MB on disk
+MAX_PDF_PAGES = 500                   # stop after this many pages
+MAX_PDF_CHARS = 8 * 1024 * 1024       # stop after this much extracted text
+
 INSTALL_HINT = ("PDF reading needs a small offline library. Install it once with:\n"
                 "    python -m pip install pdfplumber pypdf\n"
                 "(or double-click Setup.bat). It reads PDFs locally and sends nothing.")
@@ -64,18 +71,40 @@ def _num(s: str) -> float:
     return float(s.replace(",", "").replace("$", "").strip())
 
 
+def _join_bounded(pages) -> str:
+    """Join page text, stopping at the page/character caps (bomb defense)."""
+    out: list[str] = []
+    total = 0
+    for i, page_text in enumerate(pages):
+        if i >= MAX_PDF_PAGES or total >= MAX_PDF_CHARS:
+            break
+        page_text = page_text or ""
+        out.append(page_text)
+        total += len(page_text) + 1
+    return "\n".join(out)
+
+
 def extract_text(path: Path) -> str:
-    """Return all text from the PDF, pages joined by newlines."""
+    """Return all text from the PDF, pages joined by newlines.
+
+    Bounded by MAX_PDF_BYTES / MAX_PDF_PAGES / MAX_PDF_CHARS so a hostile or
+    corrupt file can't exhaust memory; normal statements are far below the caps.
+    """
+    try:
+        if path.stat().st_size > MAX_PDF_BYTES:
+            return ""
+    except OSError:
+        return ""
     if _HAVE_PDFPLUMBER:
         try:
             with pdfplumber.open(str(path)) as pdf:
-                return "\n".join((pg.extract_text() or "") for pg in pdf.pages)
+                return _join_bounded(pg.extract_text() or "" for pg in pdf.pages)
         except Exception:
             pass
     if _HAVE_PYPDF:
         try:
             reader = pypdf.PdfReader(str(path))
-            return "\n".join((pg.extract_text() or "") for pg in reader.pages)
+            return _join_bounded(pg.extract_text() or "" for pg in reader.pages)
         except Exception:
             pass
     return ""

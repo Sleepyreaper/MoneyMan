@@ -28,12 +28,16 @@ from moneyman.ingest import (_looks_like_balances, _parse_amount, _parse_date,
 from moneyman.model import Txn, categorize, clean_merchant
 from moneyman.planning import (Profile, emergency_fund, net_worth_from_balances,
                                retirement_projection)
-from moneyman.planning import (amortize, liquid_cash_from_balances,
+from moneyman.planning import (amortize, balances_from_statements,
+                               liquid_cash_from_balances,
                                lump_sum_options, mortgage_analysis,
-                               standard_payment, tax_insights)
+                               networth_series, standard_payment, tax_insights)
 from moneyman.forecast import (cashflow_forecast, expected_monthly_net, goal_plan,
-                               safe_to_spend)
-from moneyman.serve import host_is_local
+                               cancelable_subscriptions, renewal_calendar,
+                               safe_to_spend, what_if_cancel_subscriptions)
+from moneyman.serve import host_is_local, is_cross_site_post
+from moneyman.store import Store
+from moneyman.report import _esc
 from datetime import date
 
 RULES = DEFAULT_CATEGORY_RULES
@@ -465,6 +469,26 @@ class TestTaxInsights(unittest.TestCase):
     def test_zero_income_returns_none(self):
         self.assertIsNone(tax_insights(0.0, "mfj"))
 
+    def test_head_of_household_supported(self):
+        t = tax_insights(90_000.0, "hoh")
+        self.assertEqual(t["filing"], "hoh")
+        self.assertEqual(t["std_deduction"], 23625)
+        # taxable 66,375 -> HoH 22% band (64,850–103,350)
+        self.assertEqual(t["marginal_rate"], 22.0)
+
+    def test_married_filing_separately_supported(self):
+        t = tax_insights(300_000.0, "mfs")
+        self.assertEqual(t["filing"], "mfs")
+        self.assertEqual(t["std_deduction"], 15750)
+        # taxable 284,250 -> MFS 35% band (250,525–375,800)
+        self.assertEqual(t["marginal_rate"], 35.0)
+
+    def test_unknown_filing_defaults_to_mfj(self):
+        self.assertEqual(tax_insights(120_000.0, "bogus")["filing"], "mfj")
+
+    def test_result_is_stamped_with_tax_year(self):
+        self.assertEqual(tax_insights(80_000.0, "single")["tax_year"], 2025)
+
 
 class TestLiquidCash(unittest.TestCase):
     def test_only_cash_accounts_counted(self):
@@ -501,6 +525,310 @@ class TestServeHostGuard(unittest.TestCase):
     def test_foreign_or_missing_host_rejected(self):
         for h in ("evil.com:8765", "192.168.1.5:8765", "attacker.example", ""):
             self.assertFalse(host_is_local(h), repr(h))
+
+
+class TestServeCsrfGuard(unittest.TestCase):
+    def test_cross_site_sec_fetch_blocked(self):
+        self.assertTrue(is_cross_site_post("cross-site", None))
+        self.assertTrue(is_cross_site_post("Cross-Site", "http://127.0.0.1:8765"))
+
+    def test_same_origin_sec_fetch_allowed(self):
+        for sfs in ("same-origin", "same-site", "none"):
+            self.assertFalse(is_cross_site_post(sfs, None), sfs)
+
+    def test_foreign_origin_blocked_when_no_sec_fetch(self):
+        for o in ("https://evil.com", "http://attacker.example:9000",
+                  "https://127.0.0.1.evil.com"):
+            self.assertTrue(is_cross_site_post(None, o), o)
+
+    def test_local_origin_allowed_when_no_sec_fetch(self):
+        for o in ("http://127.0.0.1:8765", "http://localhost:8765",
+                  "http://[::1]:8765"):
+            self.assertFalse(is_cross_site_post(None, o), o)
+
+    def test_no_signal_is_allowed(self):
+        # A genuine same-origin POST from an old browser sends neither header.
+        self.assertFalse(is_cross_site_post(None, None))
+
+
+class TestServeSecurityHeaders(unittest.TestCase):
+    def test_csp_and_hardening_present(self):
+        from moneyman.serve import _Handler
+        h = _Handler._SECURITY_HEADERS
+        self.assertIn("frame-ancestors 'none'", h["Content-Security-Policy"])
+        self.assertIn("default-src 'none'", h["Content-Security-Policy"])
+        self.assertEqual(h["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(h["Cache-Control"], "no-store")
+
+
+class TestPrivacyBoundary(unittest.TestCase):
+    """The 'local by default' promise, enforced as code (tools/privacy_check.py)."""
+
+    def test_real_package_is_clean(self):
+        from tools.privacy_check import check
+        self.assertEqual(check(), [], "networking leaked outside its allowed files")
+
+    def test_detects_forbidden_and_ungated_imports(self):
+        from tools.privacy_check import check
+        with tempfile.TemporaryDirectory() as d:
+            pkg = Path(d)
+            (pkg / "bad.py").write_text("import requests\nimport socket\n",
+                                        encoding="utf-8")
+            (pkg / "ok.py").write_text("import json\nimport urllib.parse\n",
+                                       encoding="utf-8")
+            violations = check(pkg)
+            self.assertTrue(any("requests" in v for v in violations))
+            self.assertTrue(any("socket" in v for v in violations))
+            self.assertFalse(any("ok.py" in v for v in violations))
+
+
+class TestPayoffInvariants(unittest.TestCase):
+    """Money-conservation properties of the payoff engine — a wrong number here
+    quietly misleads someone about their debt, so guard the invariants."""
+
+    def _debts(self):
+        return [
+            Debt(name="Visa", kind="credit card", balance=6000.0, apr=24.0,
+                 min_payment=150.0),
+            Debt(name="Car", kind="auto loan", balance=12000.0, apr=6.0,
+                 min_payment=300.0),
+            Debt(name="Med", kind="medical", balance=1500.0, apr=0.0,
+                 min_payment=50.0),
+        ]
+
+    def test_money_is_conserved(self):
+        # What you pay out == what you owed + the interest that accrued.
+        for strat in ("avalanche", "snowball"):
+            res = simulate_payoff(self._debts(), 900.0, strat)
+            self.assertTrue(res.finished, strat)
+            owed = sum(d.balance for d in self._debts())
+            self.assertAlmostEqual(res.total_paid, owed + res.total_interest,
+                                   delta=1.0, msg=strat)
+
+    def test_avalanche_never_costs_more_than_snowball(self):
+        ava = simulate_payoff(self._debts(), 700.0, "avalanche")
+        sno = simulate_payoff(self._debts(), 700.0, "snowball")
+        self.assertLessEqual(ava.total_interest, sno.total_interest + 1e-6)
+
+    def test_paying_more_never_increases_interest_or_time(self):
+        small = simulate_payoff(self._debts(), 600.0, "avalanche")
+        big = simulate_payoff(self._debts(), 1200.0, "avalanche")
+        self.assertLessEqual(big.total_interest, small.total_interest)
+        self.assertLessEqual(big.months, small.months)
+
+
+class TestStoreDedup(unittest.TestCase):
+    def _txn(self, date, amount, merchant, fitid=None, occ=1, src="f.csv"):
+        return Txn(account="Acct", date=date, amount=amount,
+                   raw_description=merchant, source_file=src, merchant=merchant,
+                   fitid=fitid, occ=occ, category="Shopping")
+
+    def test_reimporting_same_statement_collapses(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(Path(d) / "m.db")
+            first = [self._txn("2024-01-05", -5.0, "Coffee"),
+                     self._txn("2024-01-06", -9.0, "Lunch")]
+            again = [self._txn("2024-01-05", -5.0, "Coffee"),
+                     self._txn("2024-01-06", -9.0, "Lunch")]
+            ins1, _ = s.upsert_many(first)
+            ins2, dup2 = s.upsert_many(again)
+            self.assertEqual(ins1, 2)
+            self.assertEqual((ins2, dup2), (0, 2))   # nothing new the 2nd time
+            self.assertEqual(s.count(), 2)
+            s.close()
+
+    def test_genuine_same_day_repeats_are_kept(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(Path(d) / "m.db")
+            ins, _ = s.upsert_many([self._txn("2024-01-05", -5.0, "Coffee", occ=1),
+                                    self._txn("2024-01-05", -5.0, "Coffee", occ=2)])
+            self.assertEqual(ins, 2)
+            self.assertEqual(s.count(), 2)
+            s.close()
+
+    def test_fitid_collapses_across_different_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(Path(d) / "m.db")
+            ins1, _ = s.upsert_many(
+                [self._txn("2024-01-05", -5.0, "Coffee", fitid="ABC", src="a.csv")])
+            ins2, _ = s.upsert_many(
+                [self._txn("2024-01-05", -5.0, "Coffee", fitid="ABC", src="b.csv")])
+            self.assertEqual((ins1, ins2), (1, 0))
+            s.close()
+
+
+class TestRefundsAndReversals(unittest.TestCase):
+    def test_refund_nets_against_the_purchase(self):
+        rows = [_rec("2024-03-01", -120.0, "Big Store", "Shopping"),
+                _rec("2024-03-09", 30.0, "Big Store", "Shopping")]   # partial refund
+        a = analyze(rows)
+        self.assertAlmostEqual(a["summary"]["net"], -90.0)
+
+
+class TestHostileImport(unittest.TestCase):
+    def _write(self, text):
+        f = Path(tempfile.mkstemp(suffix=".csv")[1])
+        f.write_text(text, encoding="utf-8")
+        return f
+
+    def test_malformed_rows_are_skipped_not_fatal(self):
+        f = self._write("Date,Description,Amount\n"
+                        "2024-01-02,GOOD ROW,-5.00\n"
+                        "not-a-date,BAD DATE,-1.00\n"
+                        "2024-01-03,BAD AMOUNT,abc\n")
+        txns, warnings = parse_csv(f, "Card")
+        self.assertEqual(len(txns), 1)
+        self.assertEqual(txns[0].raw_description, "GOOD ROW")
+        self.assertTrue(warnings)
+
+    def test_script_in_description_is_neutralized_when_rendered(self):
+        payload = "<script>alert(1)</script>"
+        f = self._write("Date,Description,Amount\n"
+                        f"2024-01-02,{payload},-5.00\n")
+        txns, _ = parse_csv(f, "Card")
+        self.assertIn("script", txns[0].raw_description)   # parse preserves text
+        rendered = _esc(txns[0].raw_description)            # render must escape it
+        self.assertNotIn("<script>", rendered)
+        self.assertIn("&lt;script&gt;", rendered)
+
+    def test_esc_escapes_quotes_for_attributes(self):
+        self.assertNotIn('"', _esc('"><img src=x onerror=alert(1)>'))
+
+
+class TestForecastEdges(unittest.TestCase):
+    def test_no_history_does_not_crash(self):
+        f = cashflow_forecast(1000.0, [], months=6)
+        self.assertEqual(f["typical_net"], 0.0)
+        self.assertTrue(f["healthy"])      # flat line never dips below the floor
+
+    def test_expected_net_on_empty_history(self):
+        e = expected_monthly_net([])
+        self.assertEqual(e["months_used"], 0)
+        self.assertEqual(e["typical"], 0.0)
+
+
+class TestRenewalCalendar(unittest.TestCase):
+
+    def _rec_item(self, merchant, last_date, ppy, amount, active=True,
+                  cadence="monthly"):
+        return {"merchant": merchant, "category": "Streaming", "active": active,
+                "periods_per_year": ppy, "last_date": last_date,
+                "current_amount": amount, "typical_amount": amount,
+                "cadence": cadence}
+
+    def test_monthly_charge_predicts_next_within_horizon(self):
+        today = date(2024, 6, 20)
+        cal = renewal_calendar(
+            [self._rec_item("Netflix", "2024-05-25", 12, 15.99)], today)
+        self.assertEqual(cal["count"], 1)
+        item = cal["items"][0]
+        self.assertEqual(item["next_date"], "2024-06-24")   # ~30 days after 05-25
+        self.assertEqual(item["days_until"], 4)
+        self.assertTrue(item["soon"])
+        self.assertAlmostEqual(cal["total_amount"], 15.99)
+
+    def test_far_off_annual_charge_is_excluded(self):
+        today = date(2024, 6, 20)
+        cal = renewal_calendar(
+            [self._rec_item("Amazon Prime", "2024-03-01", 1, 139.0,
+                            cadence="yearly")], today, horizon_days=45)
+        self.assertEqual(cal["count"], 0)   # next charge ~next March, far away
+
+    def test_inactive_and_bad_dates_are_skipped(self):
+        today = date(2024, 6, 20)
+        cal = renewal_calendar([
+            self._rec_item("Old Gym", "2024-06-01", 12, 40.0, active=False),
+            self._rec_item("Broken", "not-a-date", 12, 9.0),
+        ], today)
+        self.assertEqual(cal["count"], 0)
+
+    def test_stale_last_date_rolls_forward_to_next_due(self):
+        # last charge is months old; the predicted next charge must be in the future
+        today = date(2024, 6, 20)
+        cal = renewal_calendar(
+            [self._rec_item("Spotify", "2024-01-10", 12, 11.99)], today)
+        self.assertEqual(cal["count"], 1)
+        self.assertGreaterEqual(cal["items"][0]["next_date"], today.isoformat())
+
+
+class TestPdfResourceBounds(unittest.TestCase):
+    def test_join_stops_at_page_cap(self):
+        from moneyman import pdf
+        gen = (f"P{i}|" for i in range(pdf.MAX_PDF_PAGES + 50))
+        self.assertEqual(pdf._join_bounded(gen).count("|"), pdf.MAX_PDF_PAGES)
+
+    def test_join_stops_at_char_cap(self):
+        from moneyman import pdf
+        n = pdf.MAX_PDF_CHARS // 2 + 10
+        text = pdf._join_bounded(iter(["A" * n, "B" * n, "C" * n, "D" * n]))
+        self.assertIn("A", text)
+        self.assertIn("B", text)
+        self.assertNotIn("C", text)        # char budget exhausted before page 3
+
+
+class TestNetWorthTrendFromStatements(unittest.TestCase):
+    def _meta(self, account, kind, period_end, new_balance):
+        from moneyman.pdf import StatementMeta
+        return StatementMeta(account=account, kind=kind, period_end=period_end,
+                             new_balance=new_balance, source_file="s.pdf")
+
+    def test_debts_are_signed_negative_assets_positive(self):
+        metas = [self._meta("Checking", "bank", "2024-01-31", 4000.0),
+                 self._meta("Visa", "credit card", "2024-01-31", 1500.0)]
+        rows = balances_from_statements(metas)
+        as_dict = {a: b for _, a, b in rows}
+        self.assertEqual(as_dict["Checking"], 4000.0)
+        self.assertEqual(as_dict["Visa"], -1500.0)     # debt reduces net worth
+
+    def test_builds_a_trend_from_monthly_statements(self):
+        metas = [self._meta("Checking", "bank", f"2024-0{m}-28", 1000.0 * m)
+                 for m in (1, 2, 3)]
+        series = networth_series(balances_from_statements(metas))
+        self.assertGreaterEqual(len(series), 3)
+        self.assertEqual(series[-1][1], 3000.0)         # latest balance forward-filled
+
+    def test_unparseable_period_is_skipped(self):
+        metas = [self._meta("Checking", "bank", "sometime", 500.0)]
+        self.assertEqual(balances_from_statements(metas), [])
+
+
+class TestWhatIfSubscriptions(unittest.TestCase):
+    def _sub(self, merchant, annual, category="Streaming", active=True):
+        return {"merchant": merchant, "category": category, "active": active,
+                "annual_cost": annual, "periods_per_year": 12,
+                "typical_amount": round(annual / 12, 2)}
+
+    def test_only_discretionary_active_subs_are_cancelable(self):
+        recurring = [
+            self._sub("Netflix", 180.0),
+            self._sub("Rent", 24000.0, category="Housing"),       # essential
+            self._sub("Old App", 60.0, active=False),             # inactive
+            self._sub("Spotify", 120.0, category="Software & Apps"),
+        ]
+        names = [s["merchant"] for s in cancelable_subscriptions(recurring)]
+        self.assertEqual(names, ["Netflix", "Spotify"])           # biggest first
+
+    def test_redirecting_to_debt_shortens_payoff(self):
+        recurring = [self._sub("Netflix", 240.0), self._sub("Hulu", 180.0)]
+        debts = [Debt(name="Visa", kind="credit card", balance=4000.0, apr=22.0,
+                      min_payment=100.0)]
+        w = what_if_cancel_subscriptions(recurring, debts, base_monthly=100.0)
+        self.assertTrue(w["has_subs"])
+        self.assertTrue(w["has_debts"])
+        worst = w["scenarios"][-1]                                # cancel all
+        self.assertGreater(worst["monthly_freed"], 0)
+        self.assertGreaterEqual(worst["months_saved"], 1)        # pays off sooner
+        self.assertGreater(worst["interest_saved"], 0)
+
+    def test_no_debts_shows_invested_value(self):
+        recurring = [self._sub("Netflix", 240.0)]
+        w = what_if_cancel_subscriptions(recurring, debts=[], base_monthly=0.0)
+        self.assertFalse(w["has_debts"])
+        self.assertGreater(w["scenarios"][0]["invested_10yr"], 0)
+
+    def test_no_subscriptions_returns_flag(self):
+        w = what_if_cancel_subscriptions([], debts=[], base_monthly=0.0)
+        self.assertFalse(w["has_subs"])
 
 
 if __name__ == "__main__":

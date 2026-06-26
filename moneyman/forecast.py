@@ -20,7 +20,7 @@ from __future__ import annotations
 import csv
 import io
 import statistics
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 
@@ -96,6 +96,150 @@ def cashflow_forecast(starting_cash: float, cash_flow: list[dict],
         "shortfall_month": shortfall_month,
         "runway_months": runway_months,
         "healthy": shortfall_month is None,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Bill & renewal calendar
+# --------------------------------------------------------------------------- #
+def renewal_calendar(recurring: list[dict], today: date | None = None,
+                     horizon_days: int = 45) -> dict:
+    """Upcoming subscription/bill renewals — "what's about to hit," in date order.
+
+    For each active recurring charge we predict its next occurrence from the last
+    one and its cadence, roll it forward to today if the last charge is older than
+    one period, and keep those landing within `horizon_days`. This is the renewal
+    calendar that Monarch / Rocket Money show — but built entirely from your own
+    history, offline, so a forgotten annual charge can't ambush you.
+    """
+    today = today or date.today()
+    items: list[dict] = []
+    for r in recurring:
+        if not r.get("active"):
+            continue
+        last = (r.get("last_date") or "")[:10]
+        try:
+            last_d = datetime.strptime(last, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            continue
+        ppy = r.get("periods_per_year") or 0
+        gap = max(1, round(365.25 / ppy)) if ppy else 30
+        nxt = last_d + timedelta(days=gap)
+        guard = 0
+        while nxt < today and guard < 500:         # roll forward to the next due
+            nxt += timedelta(days=gap)
+            guard += 1
+        days_until = (nxt - today).days
+        if 0 <= days_until <= horizon_days:
+            amount = round(r.get("current_amount") or r.get("typical_amount") or 0.0, 2)
+            items.append({
+                "merchant": r.get("merchant", "(charge)"),
+                "category": r.get("category", ""),
+                "cadence": r.get("cadence", ""),
+                "amount": amount,
+                "next_date": nxt.isoformat(),
+                "days_until": days_until,
+                "soon": days_until <= 7,
+            })
+    items.sort(key=lambda x: (x["next_date"], -x["amount"]))
+    return {
+        "horizon_days": horizon_days,
+        "items": items,
+        "count": len(items),
+        "total_amount": round(sum(i["amount"] for i in items), 2),
+        "soon_total": round(sum(i["amount"] for i in items if i["soon"]), 2),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# What-if: cancel discretionary subscriptions and redirect the savings
+# --------------------------------------------------------------------------- #
+_DISCRETIONARY_SUB_CATEGORIES = {
+    "Streaming", "Software & Apps", "Entertainment", "Health & Fitness",
+}
+
+
+def cancelable_subscriptions(recurring: list[dict]) -> list[dict]:
+    """Active, clearly-discretionary recurring charges, biggest annual cost first.
+
+    Deliberately conservative: it only ever suggests cancelling obviously
+    optional things (streaming, apps, entertainment, gym) — never rent, utilities,
+    insurance, or groceries.
+    """
+    subs = [r for r in recurring
+            if r.get("active")
+            and r.get("category") in _DISCRETIONARY_SUB_CATEGORIES
+            and (r.get("annual_cost") or 0) > 0]
+    subs.sort(key=lambda r: r.get("annual_cost", 0), reverse=True)
+    return subs
+
+
+def what_if_cancel_subscriptions(recurring: list[dict], debts: list,
+                                 base_monthly: float,
+                                 invest_return_pct: float = 7.0) -> dict:
+    """Quantify cancelling discretionary subscriptions and redirecting the money.
+
+    For each scenario (cancel the top 1, top 3, or all discretionary subscriptions)
+    we compute the monthly money freed, and:
+      * with debts: re-run the avalanche payoff with that money added on top of
+        `base_monthly` (your minimum payments) and report months and interest saved
+        versus doing nothing — the "debt-free X months sooner" story;
+      * with no debts: show the annual savings and what it grows to if invested.
+
+    Everything is your own data, computed locally — no black box.
+    """
+    from .debts import simulate_payoff
+
+    subs = cancelable_subscriptions(recurring)
+    if not subs:
+        return {"has_subs": False}
+
+    has_debts = bool(debts) and any(getattr(d, "balance", 0) > 0 for d in debts)
+    baseline = simulate_payoff(debts, base_monthly, "avalanche") if has_debts else None
+
+    def _fv_monthly(amount: float, years: int) -> float:
+        mr = max(0.0, invest_return_pct) / 100.0 / 12.0
+        n = years * 12
+        if mr <= 0:
+            return round(amount * n, 2)
+        return round(amount * (((1 + mr) ** n - 1) / mr), 2)
+
+    def _scenario(picked: list[dict]) -> dict:
+        monthly_freed = round(sum(s["annual_cost"] for s in picked) / 12.0, 2)
+        out = {
+            "cancel": [{"merchant": s["merchant"],
+                        "annual_cost": round(s["annual_cost"], 2)} for s in picked],
+            "count": len(picked),
+            "monthly_freed": monthly_freed,
+            "annual_savings": round(monthly_freed * 12, 2),
+        }
+        if has_debts and baseline is not None:
+            new = simulate_payoff(debts, base_monthly + monthly_freed, "avalanche")
+            ok = baseline.finished and new.finished
+            out["months_saved"] = baseline.months - new.months if ok else None
+            out["interest_saved"] = (round(baseline.total_interest
+                                           - new.total_interest, 2) if ok else None)
+            out["new_payoff_date"] = new.payoff_date
+        else:
+            out["invested_5yr"] = _fv_monthly(monthly_freed, 5)
+            out["invested_10yr"] = _fv_monthly(monthly_freed, 10)
+        return out
+
+    scenarios, seen = [], set()
+    for k in (1, 3, len(subs)):
+        k = min(k, len(subs))
+        if k in seen:
+            continue
+        seen.add(k)
+        scenarios.append(_scenario(subs[:k]))
+
+    return {
+        "has_subs": True,
+        "has_debts": has_debts,
+        "subscriptions": [{"merchant": s["merchant"],
+                           "category": s.get("category", ""),
+                           "annual_cost": round(s["annual_cost"], 2)} for s in subs],
+        "scenarios": scenarios,
     }
 
 

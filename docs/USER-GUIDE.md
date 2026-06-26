@@ -10,9 +10,11 @@ out a **judgment-free plan to get to $0 debt**, tells you what to **save for the
 surprises** coming your way, and points the way toward real financial
 independence.
 
-> 🔒 **Everything stays on your computer.** No website, no login, no internet.
-> Your financial information never leaves this machine, and MoneyMan never looks
-> up your address or accounts online.
+> 🔒 **Everything stays on your computer.** No website, no login, no telemetry —
+> and your financial information never leaves this machine. MoneyMan runs fully
+> offline by default; the only thing that can touch the internet is an optional
+> home-value lookup you'd have to turn on yourself (and even then it sends only
+> your street address, never your money details).
 
 ---
 

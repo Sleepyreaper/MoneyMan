@@ -44,7 +44,7 @@ class Profile:
     target_retirement_age: int | None = None
     other_assets: float = 0.0
     monthly_income_override: float | None = None   # take-home you set yourself
-    filing_status: str = "mfj"                  # "single" | "mfj" (tax estimate)
+    filing_status: str = "mfj"      # single | mfj | hoh | mfs (tax estimate)
     hsa_eligible: bool = False
     has_pension_or_trs: bool = False
     owns_home: bool = False
@@ -122,9 +122,16 @@ def load_profile(path: Path) -> Profile:
     p.monthly_income_override = _f(g("monthly take-home income",
                                      "monthly household income", "monthly income",
                                      "take-home income"))
-    fs = g("filing status (single/mfj)", "filing status").strip().lower()
-    if fs in ("single", "mfj", "married", "joint", "married filing jointly"):
-        p.filing_status = "single" if fs == "single" else "mfj"
+    fs = g("filing status (single/mfj/hoh/mfs)", "filing status (single/mfj)",
+           "filing status").strip().lower()
+    if fs == "single":
+        p.filing_status = "single"
+    elif fs in ("hoh", "head of household", "head-of-household"):
+        p.filing_status = "hoh"
+    elif fs in ("mfs", "married filing separately", "married separate", "separately"):
+        p.filing_status = "mfs"
+    elif fs in ("mfj", "married", "joint", "married filing jointly"):
+        p.filing_status = "mfj"
     p.monthly_retirement_contribution = _f(g(
         "monthly retirement contribution", "retirement contribution")) or 0.0
     p.expected_return_pct = _f(g("expected return (%)", "expected return")) or 7.0
@@ -166,8 +173,9 @@ Your age,
 # Your household take-home income each month (what actually lands in your accounts).
 # Leave blank to let MoneyMan estimate it from your deposits.
 Monthly take-home income,
-# Tax estimate only: "single" or "mfj" (married filing jointly). Default mfj.
-Filing status (single/mfj),
+# Tax estimate only. Enter: single, mfj (married filing jointly),
+# hoh (head of household), or mfs (married filing separately). Default mfj.
+Filing status (single/mfj/hoh/mfs),
 Cash savings,
 Retirement balance,
 Monthly retirement contribution,
@@ -369,6 +377,29 @@ def net_worth_from_balances(by_account: dict[str, float]) -> dict:
             "total_assets": total_assets, "total_debts": total_debts,
             "net_worth": round(total_assets - total_debts, 2),
             "from_balances": True}
+
+
+def balances_from_statements(metas) -> list[tuple[str, str, float]]:
+    """Derive (date, account, signed balance) points from statement metadata.
+
+    This lets the net-worth-over-time chart work for people who only have regular
+    monthly statements (PDF/CSV), not a special "balances" export — far more
+    families. Debts (credit cards / loans) are signed negative so the series sums
+    to true net worth; bank balances stay positive.
+    """
+    from .ingest import _parse_date
+    out: list[tuple[str, str, float]] = []
+    for m in metas:
+        bal = getattr(m, "new_balance", None)
+        if bal is None:
+            continue
+        raw = getattr(m, "period_end", None) or getattr(m, "period_start", None)
+        d = _parse_date(raw) if raw else None
+        if not d:
+            continue
+        signed = -abs(bal) if getattr(m, "kind", "") in ("credit card", "loan") else bal
+        out.append((d, m.account, round(signed, 2)))
+    return out
 
 
 def networth_series(rows: list[tuple[str, str, float]]) -> list[tuple[str, float]]:
@@ -596,14 +627,21 @@ def mortgage_analysis(name: str, balance: float, apr: float,
 # --------------------------------------------------------------------------- #
 # Tax awareness (educational estimate — NOT tax advice)
 # --------------------------------------------------------------------------- #
-# 2025 federal ordinary-income brackets (close enough for planning in 2026).
+# 2025 federal ordinary-income brackets and standard deductions (Rev. Proc.
+# 2024-40, with the 2025 standard-deduction amounts as raised by the 2025 tax
+# law). A federal-only orientation estimate — update these once a year.
+TAX_YEAR = 2025
 _BRACKETS = {
     "single": [(0, 0.10), (11925, 0.12), (48475, 0.22), (103350, 0.24),
                (197300, 0.32), (250525, 0.35), (626350, 0.37)],
     "mfj": [(0, 0.10), (23850, 0.12), (96950, 0.22), (206700, 0.24),
             (394600, 0.32), (501050, 0.35), (751600, 0.37)],
+    "hoh": [(0, 0.10), (17000, 0.12), (64850, 0.22), (103350, 0.24),
+            (197300, 0.32), (250500, 0.35), (626350, 0.37)],
+    "mfs": [(0, 0.10), (11925, 0.12), (48475, 0.22), (103350, 0.24),
+            (197300, 0.32), (250525, 0.35), (375800, 0.37)],
 }
-_STD_DEDUCTION = {"single": 15000, "mfj": 30000}
+_STD_DEDUCTION = {"single": 15750, "mfj": 31500, "hoh": 23625, "mfs": 15750}
 
 
 def _federal_tax(taxable: float, filing: str) -> float:
@@ -637,7 +675,7 @@ def tax_insights(gross_annual_income: float, filing_status: str = "mfj") -> dict
     """
     if gross_annual_income <= 0:
         return None
-    filing = "single" if filing_status == "single" else "mfj"
+    filing = filing_status if filing_status in _BRACKETS else "mfj"
     std = _STD_DEDUCTION[filing]
     taxable = max(0.0, gross_annual_income - std)
     marginal = _marginal_rate(taxable, filing)
@@ -659,6 +697,7 @@ def tax_insights(gross_annual_income: float, filing_status: str = "mfj") -> dict
                     "(after-tax) — pay the low rate now and withdraw tax-free later.")
     return {
         "filing": filing,
+        "tax_year": TAX_YEAR,
         "gross_income": round(gross_annual_income, 2),
         "taxable_income": round(taxable, 2),
         "std_deduction": std,
