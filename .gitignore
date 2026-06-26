@@ -1,0 +1,23 @@
+# MoneyMan keeps your financial data OUT of the code folder by default
+# (it lives in ~/Documents/MoneyMan). These rules are just belt-and-suspenders
+# in case anyone points --data at this directory or copies data in.
+
+__pycache__/
+*.pyc
+
+# Local editor / tool settings (machine-specific, not for sharing)
+.claude/
+.vscode/
+.idea/
+.DS_Store
+
+# Never commit financial data or generated reports
+Statements/
+Reports/
+database/
+*.db
+*.ofx
+*.qfx
+*.csv
+MoneyMan_*.html
+MoneyMan-Demo/

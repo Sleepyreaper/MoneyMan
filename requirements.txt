@@ -1,0 +1,15 @@
+# MoneyMan's own logic uses ONLY the Python standard library.
+#
+# The single exception is reading PDF statements, which needs an offline
+# PDF-parsing library. These are read-only document parsers with no networking —
+# they read the PDF on your disk and transmit nothing. Installing them (the only
+# time anything touches the internet) sends none of your financial data.
+#
+# If you only use CSV / QFX statements, you can skip this entirely.
+#
+# Install with:  python -m pip install -r requirements.txt   (or double-click Setup.bat)
+#
+# Requirement: Python 3.9 or newer.
+
+pdfplumber>=0.11
+pypdf>=4.0
