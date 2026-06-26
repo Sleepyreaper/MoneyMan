@@ -196,6 +196,26 @@ class _Handler(BaseHTTPRequestHandler):
             return True
         return False
 
+    # Defense-in-depth headers for the served page. The dashboard is a single
+    # self-contained document with inline CSS/SVG and one static inline <script>
+    # (all dynamic values are HTML-escaped by report._esc), so 'unsafe-inline' is
+    # required for it to work; the CSP still locks out any external/remote content
+    # and framing, and no-store keeps financial data out of the browser cache.
+    _SECURITY_HEADERS = {
+        "Content-Security-Policy": (
+            "default-src 'none'; style-src 'unsafe-inline'; "
+            "script-src 'unsafe-inline'; img-src 'self' data:; "
+            "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"),
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "Cache-Control": "no-store",
+    }
+
+    def _send_security_headers(self) -> None:
+        for name, value in self._SECURITY_HEADERS.items():
+            self.send_header(name, value)
+
     def _html(self, status=200):
         from .__main__ import compute
         analysis, plan, warnings, stats, _, dup = compute(_Handler.paths)
@@ -206,6 +226,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(body)
 

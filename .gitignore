@@ -21,3 +21,10 @@ database/
 *.csv
 MoneyMan_*.html
 MoneyMan-Demo/
+
+# ...but DO allow legitimate, non-sensitive sample/fixture files used by tests,
+# so the broad rules above can't silently drop a contributor's test data.
+!tests/**/*.csv
+!tests/**/*.ofx
+!tests/**/*.qfx
+!**/fixtures/**

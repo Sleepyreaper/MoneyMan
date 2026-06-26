@@ -549,6 +549,16 @@ class TestServeCsrfGuard(unittest.TestCase):
         self.assertFalse(is_cross_site_post(None, None))
 
 
+class TestServeSecurityHeaders(unittest.TestCase):
+    def test_csp_and_hardening_present(self):
+        from moneyman.serve import _Handler
+        h = _Handler._SECURITY_HEADERS
+        self.assertIn("frame-ancestors 'none'", h["Content-Security-Policy"])
+        self.assertIn("default-src 'none'", h["Content-Security-Policy"])
+        self.assertEqual(h["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(h["Cache-Control"], "no-store")
+
+
 class TestPrivacyBoundary(unittest.TestCase):
     """The 'local by default' promise, enforced as code (tools/privacy_check.py)."""
 
@@ -693,6 +703,21 @@ class TestForecastEdges(unittest.TestCase):
         e = expected_monthly_net([])
         self.assertEqual(e["months_used"], 0)
         self.assertEqual(e["typical"], 0.0)
+
+
+class TestPdfResourceBounds(unittest.TestCase):
+    def test_join_stops_at_page_cap(self):
+        from moneyman import pdf
+        gen = (f"P{i}|" for i in range(pdf.MAX_PDF_PAGES + 50))
+        self.assertEqual(pdf._join_bounded(gen).count("|"), pdf.MAX_PDF_PAGES)
+
+    def test_join_stops_at_char_cap(self):
+        from moneyman import pdf
+        n = pdf.MAX_PDF_CHARS // 2 + 10
+        text = pdf._join_bounded(iter(["A" * n, "B" * n, "C" * n, "D" * n]))
+        self.assertIn("A", text)
+        self.assertIn("B", text)
+        self.assertNotIn("C", text)        # char budget exhausted before page 3
 
 
 if __name__ == "__main__":
