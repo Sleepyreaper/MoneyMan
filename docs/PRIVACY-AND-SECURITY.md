@@ -59,6 +59,10 @@ computer.** This page explains exactly how, in terms you can verify.
   parsers `pdfplumber` and `pypdf` (see `requirements.txt`). They are read-only
   document parsers with no networking. Everything else is the Python standard
   library.
+- **Let the code check itself.** Run `python tools/privacy_check.py`. It parses
+  the source and fails if networking ever appears outside the two documented
+  files above — so the "local by default" promise can't quietly erode. The same
+  check runs automatically on every change in CI.
 
 ## What the report contains
 

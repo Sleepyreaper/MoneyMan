@@ -527,5 +527,26 @@ class TestServeCsrfGuard(unittest.TestCase):
         self.assertFalse(is_cross_site_post(None, None))
 
 
+class TestPrivacyBoundary(unittest.TestCase):
+    """The 'local by default' promise, enforced as code (tools/privacy_check.py)."""
+
+    def test_real_package_is_clean(self):
+        from tools.privacy_check import check
+        self.assertEqual(check(), [], "networking leaked outside its allowed files")
+
+    def test_detects_forbidden_and_ungated_imports(self):
+        from tools.privacy_check import check
+        with tempfile.TemporaryDirectory() as d:
+            pkg = Path(d)
+            (pkg / "bad.py").write_text("import requests\nimport socket\n",
+                                        encoding="utf-8")
+            (pkg / "ok.py").write_text("import json\nimport urllib.parse\n",
+                                       encoding="utf-8")
+            violations = check(pkg)
+            self.assertTrue(any("requests" in v for v in violations))
+            self.assertTrue(any("socket" in v for v in violations))
+            self.assertFalse(any("ok.py" in v for v in violations))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
