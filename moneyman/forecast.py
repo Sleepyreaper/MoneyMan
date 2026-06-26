@@ -20,7 +20,7 @@ from __future__ import annotations
 import csv
 import io
 import statistics
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 
@@ -96,6 +96,58 @@ def cashflow_forecast(starting_cash: float, cash_flow: list[dict],
         "shortfall_month": shortfall_month,
         "runway_months": runway_months,
         "healthy": shortfall_month is None,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Bill & renewal calendar
+# --------------------------------------------------------------------------- #
+def renewal_calendar(recurring: list[dict], today: date | None = None,
+                     horizon_days: int = 45) -> dict:
+    """Upcoming subscription/bill renewals — "what's about to hit," in date order.
+
+    For each active recurring charge we predict its next occurrence from the last
+    one and its cadence, roll it forward to today if the last charge is older than
+    one period, and keep those landing within `horizon_days`. This is the renewal
+    calendar that Monarch / Rocket Money show — but built entirely from your own
+    history, offline, so a forgotten annual charge can't ambush you.
+    """
+    today = today or date.today()
+    items: list[dict] = []
+    for r in recurring:
+        if not r.get("active"):
+            continue
+        last = (r.get("last_date") or "")[:10]
+        try:
+            last_d = datetime.strptime(last, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            continue
+        ppy = r.get("periods_per_year") or 0
+        gap = max(1, round(365.25 / ppy)) if ppy else 30
+        nxt = last_d + timedelta(days=gap)
+        guard = 0
+        while nxt < today and guard < 500:         # roll forward to the next due
+            nxt += timedelta(days=gap)
+            guard += 1
+        days_until = (nxt - today).days
+        if 0 <= days_until <= horizon_days:
+            amount = round(r.get("current_amount") or r.get("typical_amount") or 0.0, 2)
+            items.append({
+                "merchant": r.get("merchant", "(charge)"),
+                "category": r.get("category", ""),
+                "cadence": r.get("cadence", ""),
+                "amount": amount,
+                "next_date": nxt.isoformat(),
+                "days_until": days_until,
+                "soon": days_until <= 7,
+            })
+    items.sort(key=lambda x: (x["next_date"], -x["amount"]))
+    return {
+        "horizon_days": horizon_days,
+        "items": items,
+        "count": len(items),
+        "total_amount": round(sum(i["amount"] for i in items), 2),
+        "soon_total": round(sum(i["amount"] for i in items if i["soon"]), 2),
     }
 
 

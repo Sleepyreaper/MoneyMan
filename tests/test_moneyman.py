@@ -32,7 +32,7 @@ from moneyman.planning import (amortize, liquid_cash_from_balances,
                                lump_sum_options, mortgage_analysis,
                                standard_payment, tax_insights)
 from moneyman.forecast import (cashflow_forecast, expected_monthly_net, goal_plan,
-                               safe_to_spend)
+                               renewal_calendar, safe_to_spend)
 from moneyman.serve import host_is_local, is_cross_site_post
 from moneyman.store import Store
 from moneyman.report import _esc
@@ -703,6 +703,49 @@ class TestForecastEdges(unittest.TestCase):
         e = expected_monthly_net([])
         self.assertEqual(e["months_used"], 0)
         self.assertEqual(e["typical"], 0.0)
+
+
+class TestRenewalCalendar(unittest.TestCase):
+    def _rec_item(self, merchant, last_date, ppy, amount, active=True,
+                  cadence="monthly"):
+        return {"merchant": merchant, "category": "Streaming", "active": active,
+                "periods_per_year": ppy, "last_date": last_date,
+                "current_amount": amount, "typical_amount": amount,
+                "cadence": cadence}
+
+    def test_monthly_charge_predicts_next_within_horizon(self):
+        today = date(2024, 6, 20)
+        cal = renewal_calendar(
+            [self._rec_item("Netflix", "2024-05-25", 12, 15.99)], today)
+        self.assertEqual(cal["count"], 1)
+        item = cal["items"][0]
+        self.assertEqual(item["next_date"], "2024-06-24")   # ~30 days after 05-25
+        self.assertEqual(item["days_until"], 4)
+        self.assertTrue(item["soon"])
+        self.assertAlmostEqual(cal["total_amount"], 15.99)
+
+    def test_far_off_annual_charge_is_excluded(self):
+        today = date(2024, 6, 20)
+        cal = renewal_calendar(
+            [self._rec_item("Amazon Prime", "2024-03-01", 1, 139.0,
+                            cadence="yearly")], today, horizon_days=45)
+        self.assertEqual(cal["count"], 0)   # next charge ~next March, far away
+
+    def test_inactive_and_bad_dates_are_skipped(self):
+        today = date(2024, 6, 20)
+        cal = renewal_calendar([
+            self._rec_item("Old Gym", "2024-06-01", 12, 40.0, active=False),
+            self._rec_item("Broken", "not-a-date", 12, 9.0),
+        ], today)
+        self.assertEqual(cal["count"], 0)
+
+    def test_stale_last_date_rolls_forward_to_next_due(self):
+        # last charge is months old; the predicted next charge must be in the future
+        today = date(2024, 6, 20)
+        cal = renewal_calendar(
+            [self._rec_item("Spotify", "2024-01-10", 12, 11.99)], today)
+        self.assertEqual(cal["count"], 1)
+        self.assertGreaterEqual(cal["items"][0]["next_date"], today.isoformat())
 
 
 class TestPdfResourceBounds(unittest.TestCase):

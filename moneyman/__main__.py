@@ -352,6 +352,7 @@ def _build_plan(analysis: dict, paths: Paths, metas, balances=None) -> dict:
         "retirement": planning.retirement_projection(profile, essentials,
                                                       expense_monthly),
         "bills": planning.bill_optimizer(analysis.get("recurring", [])),
+        "renewals": forecast.renewal_calendar(analysis.get("recurring", [])),
         "foo": planning.order_of_operations(profile, payoff_debts, emergency),
         "hidden": planning.HIDDEN_HOLDINGS,
         "essentials_monthly": round(essentials, 2),

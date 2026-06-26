@@ -887,6 +887,41 @@ def _dur(months: int) -> str:
     return f"{m} mo"
 
 
+def _days_away(n: int) -> str:
+    if n <= 0:
+        return "today"
+    if n == 1:
+        return "tomorrow"
+    return f"in {n} days"
+
+
+def _renewals_section(plan: dict) -> str:
+    """A 'renews in the next N days' calendar built from recurring detection."""
+    cal = plan.get("renewals") or {}
+    items = cal.get("items", [])
+    horizon = cal.get("horizon_days", 45)
+    if not items:
+        return ('<div class="subtle">No upcoming subscription or bill renewals '
+                f'detected in the next {horizon} days.</div>')
+    rows = "".join(
+        f'<tr><td>{_esc(i["next_date"])}</td>'
+        f'<td>{("⚠️ " if i["soon"] else "")}{_days_away(i["days_until"])}</td>'
+        f'<td>{_esc(i["merchant"])}</td>'
+        f'<td>{_esc(i["cadence"])}</td>'
+        f'<td class="num">{_money(i["amount"])}</td></tr>'
+        for i in items)
+    soon = cal.get("soon_total", 0)
+    soon_note = (f' <b>{_money(soon)}</b> of that lands within 7 days.'
+                 if soon else "")
+    return (
+        f'<p class="lede">About <b>{_money(cal.get("total_amount", 0))}</b> of '
+        f'subscriptions and bills are scheduled to charge in the next {horizon} '
+        f'days.{soon_note} Cancel anything you don\'t want <i>before</i> it renews.</p>'
+        f'<div class="tablewrap"><table><thead><tr><th>Date</th><th>When</th>'
+        f'<th>Vendor</th><th>Cadence</th><th class="num">Amount</th></tr></thead>'
+        f'<tbody>{rows}</tbody></table></div>')
+
+
 def monthly_bills_section(analysis: dict) -> str:
     """The 'did you know you pay each of these every month?' table."""
     if analysis.get("empty"):
@@ -1351,7 +1386,8 @@ def build_html(analysis: dict, data_root: Path, warnings: list[str],
         f'<p class="lede">The few highest-impact things — biggest dollars first. '
         f'Click any one to see the exact transactions behind it.</p>'
         f'{prio_top}{prio_more}'
-        f'<h2>📅 Bills you pay every month — did you know?</h2>{bills_block}')
+        f'<h2>📅 Bills you pay every month — did you know?</h2>{bills_block}'
+        f'<h2>🔔 Renewing soon</h2>{_renewals_section(plan)}')
     mortgage_html = _mortgage_section(plan)
     mortgage_block = (f'<h3 style="margin-top:18px">🏠 Pay your home loan down faster'
                       f'</h3>{mortgage_html}') if mortgage_html else ""
