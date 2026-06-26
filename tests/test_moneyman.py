@@ -28,9 +28,10 @@ from moneyman.ingest import (_looks_like_balances, _parse_amount, _parse_date,
 from moneyman.model import Txn, categorize, clean_merchant
 from moneyman.planning import (Profile, emergency_fund, net_worth_from_balances,
                                retirement_projection)
-from moneyman.planning import (amortize, liquid_cash_from_balances,
+from moneyman.planning import (amortize, balances_from_statements,
+                               liquid_cash_from_balances,
                                lump_sum_options, mortgage_analysis,
-                               standard_payment, tax_insights)
+                               networth_series, standard_payment, tax_insights)
 from moneyman.forecast import (cashflow_forecast, expected_monthly_net, goal_plan,
                                renewal_calendar, safe_to_spend)
 from moneyman.serve import host_is_local, is_cross_site_post
@@ -706,6 +707,7 @@ class TestForecastEdges(unittest.TestCase):
 
 
 class TestRenewalCalendar(unittest.TestCase):
+
     def _rec_item(self, merchant, last_date, ppy, amount, active=True,
                   cadence="monthly"):
         return {"merchant": merchant, "category": "Streaming", "active": active,
@@ -761,6 +763,32 @@ class TestPdfResourceBounds(unittest.TestCase):
         self.assertIn("A", text)
         self.assertIn("B", text)
         self.assertNotIn("C", text)        # char budget exhausted before page 3
+
+
+class TestNetWorthTrendFromStatements(unittest.TestCase):
+    def _meta(self, account, kind, period_end, new_balance):
+        from moneyman.pdf import StatementMeta
+        return StatementMeta(account=account, kind=kind, period_end=period_end,
+                             new_balance=new_balance, source_file="s.pdf")
+
+    def test_debts_are_signed_negative_assets_positive(self):
+        metas = [self._meta("Checking", "bank", "2024-01-31", 4000.0),
+                 self._meta("Visa", "credit card", "2024-01-31", 1500.0)]
+        rows = balances_from_statements(metas)
+        as_dict = {a: b for _, a, b in rows}
+        self.assertEqual(as_dict["Checking"], 4000.0)
+        self.assertEqual(as_dict["Visa"], -1500.0)     # debt reduces net worth
+
+    def test_builds_a_trend_from_monthly_statements(self):
+        metas = [self._meta("Checking", "bank", f"2024-0{m}-28", 1000.0 * m)
+                 for m in (1, 2, 3)]
+        series = networth_series(balances_from_statements(metas))
+        self.assertGreaterEqual(len(series), 3)
+        self.assertEqual(series[-1][1], 3000.0)         # latest balance forward-filled
+
+    def test_unparseable_period_is_skipped(self):
+        metas = [self._meta("Checking", "bank", "sometime", 500.0)]
+        self.assertEqual(balances_from_statements(metas), [])
 
 
 if __name__ == "__main__":

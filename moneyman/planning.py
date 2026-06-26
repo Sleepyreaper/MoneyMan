@@ -379,6 +379,29 @@ def net_worth_from_balances(by_account: dict[str, float]) -> dict:
             "from_balances": True}
 
 
+def balances_from_statements(metas) -> list[tuple[str, str, float]]:
+    """Derive (date, account, signed balance) points from statement metadata.
+
+    This lets the net-worth-over-time chart work for people who only have regular
+    monthly statements (PDF/CSV), not a special "balances" export — far more
+    families. Debts (credit cards / loans) are signed negative so the series sums
+    to true net worth; bank balances stay positive.
+    """
+    from .ingest import _parse_date
+    out: list[tuple[str, str, float]] = []
+    for m in metas:
+        bal = getattr(m, "new_balance", None)
+        if bal is None:
+            continue
+        raw = getattr(m, "period_end", None) or getattr(m, "period_start", None)
+        d = _parse_date(raw) if raw else None
+        if not d:
+            continue
+        signed = -abs(bal) if getattr(m, "kind", "") in ("credit card", "loan") else bal
+        out.append((d, m.account, round(signed, 2)))
+    return out
+
+
 def networth_series(rows: list[tuple[str, str, float]]) -> list[tuple[str, float]]:
     """Monthly net-worth time series (forward-fills each account's last balance)."""
     if not rows:

@@ -83,6 +83,16 @@ def _setup_data_dir(paths: Paths) -> None:
         sh.write_text(START_HERE, encoding="utf-8")
 
 
+def _trend_balances(balances, metas):
+    """Input for the net-worth-over-time chart: the balances export, plus
+    statement-derived balance points for any accounts the export doesn't cover —
+    so the trend appears even for people who only have monthly statements."""
+    export_accts = {a for _, a, _ in balances}
+    extra = [r for r in planning.balances_from_statements(metas)
+             if r[1] not in export_accts]
+    return list(balances) + extra
+
+
 def _build_debts(manual: list[Debt], metas) -> list[Debt]:
     """Merge manually-listed debts with debts read from PDF statements."""
     have = {d.name.lower() for d in manual}
@@ -348,7 +358,7 @@ def _build_plan(analysis: dict, paths: Paths, metas, balances=None) -> dict:
         "home": planning.home_plan(profile.home_value),
         "emergency": emergency,
         "net_worth": networth,
-        "net_worth_trend": planning.networth_series(balances),
+        "net_worth_trend": planning.networth_series(_trend_balances(balances, metas)),
         "retirement": planning.retirement_projection(profile, essentials,
                                                       expense_monthly),
         "bills": planning.bill_optimizer(analysis.get("recurring", [])),
